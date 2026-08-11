@@ -4,16 +4,20 @@
 (require 'comint)
 (require 'compile)
 (require 'flutter-tools-vars)
+(require 'flutter-tools-utils)
 
-(defun flutter-get-devices ()
+(defun flutter-tools--get-devices ()
   "Get a list of connected Flutter devices as (Name . ID) pairs."
-  (let* ((output (shell-command-to-string "flutter devices --machine"))
+  (let* ((flutter-bin (flutter-tools--get-executable))
+         (cmd (format "%s devices --machine" flutter-bin))
+         (output (shell-command-to-string cmd))
          (json-array (json-read-from-string output)))
     (mapcar (lambda (device)
               (cons (alist-get 'name device)
                     (alist-get 'id device)))
             json-array)))
 
+;;;###autoload
 (defun flutter-run (&optional device-id)
   "Start `flutter run' in a dedicated buffer at the project root.
 If multiple devices are connected, prompt the user to select one.
@@ -21,66 +25,61 @@ Remembers the selected device for future runs. Use a prefix argument
 (e.g., C-u M-x flutter-run) to force re-selecting a device."
   (interactive
    (list 
-    ;; Check if we already have a saved device AND user didn't press C-u
     (if (and flutter-tools--last-device-id (not current-prefix-arg))
         flutter-tools--last-device-id
-      ;; Otherwise, fetch devices and prompt if necessary
-      (let ((devices (flutter-get-devices)))
+      (let ((devices (flutter-tools--get-devices)))
         (cond
-         ((= (length devices) 0) nil) ;; No devices
-         ((= (length devices) 1)      ;; Exactly 1 device, just use it
-          (cdr (car devices)))
-         (t                           ;; > 1 device, prompt user
-          (let ((choice (completing-read "Select device: " devices)))
+         ((null devices) 
+          (message "No Flutter devices found.")
+          nil)
+         ((= (length devices) 1) 
+          (cdar devices)) ;; `cdar` gets the ID of the first (and only) pair
+         (t 
+          (let ((choice (completing-read "Select device: " devices nil t)))
             (cdr (assoc choice devices)))))))))
              
-  ;; Save the chosen device for next time
   (when device-id
     (setq flutter-tools--last-device-id device-id))
     
-  (let* ((buf-name "*flutter run*")
-         (buf (get-buffer-create buf-name))
-         (project-root (locate-dominating-file default-directory "pubspec.yaml"))
-         ;; Fallback to current directory if not in a flutter project
-         (root-dir (if project-root project-root default-directory)) 
-         (default-directory root-dir)
-         (args (if device-id 
-                   (list "run" "-d" device-id) 
-                 (list "run"))))
+  (let* ((project-root (or (locate-dominating-file default-directory "pubspec.yaml")
+                           default-directory))
+         ;; Temporarily set default-directory so the comint buffer inherits it correctly
+         (default-directory project-root)
+         (flutter-bin (flutter-tools--get-executable))
+         (buf (get-buffer-create "*flutter run*"))
+         (args (if device-id (list "run" "-d" device-id) (list "run"))))
     
-    (apply #'make-comint-in-buffer "flutter-run" buf "flutter.bat" nil args)
-
+    ;; Create the process using the cross-platform executable
+    (apply #'make-comint-in-buffer "flutter-run" buf flutter-bin nil args)
     (setq flutter-tools--process (get-buffer-process buf))
     
     (with-current-buffer buf
-      ;; This ensures Emacs knows where `lib/main.dart` is relative to.
-      (setq default-directory root-dir) 
-
-      ;; Make the regex list local to THIS specific buffer
-      (make-local-variable 'compilation-error-regexp-alist)
-      ;; Put our custom rules at the very front of the local list
-      (setq compilation-error-regexp-alist
-            (append '(flutter-dart 
-                      flutter-msbuild-error 
-                      flutter-msbuild-warning)
-                    compilation-error-regexp-alist))
+      ;; setq-local is the modern, idiomatic replacement for make-local-variable + setq
+      (setq-local compilation-error-regexp-alist
+                  (append '(flutter-dart 
+                            flutter-msbuild-error 
+                            flutter-msbuild-warning)
+                          compilation-error-regexp-alist))
       
       (compilation-shell-minor-mode 1)
       (ansi-color-for-comint-mode-on))
     
     (display-buffer buf)))
 
+;;;###autoload
 (defun flutter-hot-reload ()
-  "send the 'r' character to the active flutter process."
+  "Send the 'r' character to the active flutter process."
   (interactive)
   (if (and flutter-tools--process (process-live-p flutter-tools--process))
       (progn
         (process-send-string flutter-tools--process "r")
-        (message "sent hot reload to flutter..."))
-    (message "flutter is not running.")))
+        (message "Sent hot reload to flutter..."))
+    (message "Flutter is not currently running.")))
 
+;;;###autoload
 (defun flutter-reload-on-save ()
-  "trigger hot reload automatically when saving a dart file."
+  "Trigger hot reload automatically when saving a dart file.
+Add this to `after-save-hook'."
   (when (and (eq major-mode 'dart-mode)
              flutter-tools--process
              (process-live-p flutter-tools--process))

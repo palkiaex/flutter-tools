@@ -1,49 +1,64 @@
 ;;; flutter-tools-create.el --- Create flutter projects -*- lexical-binding: t; -*-
 
 (require 'dired)
+(require 'flutter-tools-utils)
 
-(defun flutter-create ()
+(defun flutter-tools--open-project (name dir template)
+  "Navigate to the newly created flutter project at DIR.
+Opens dired and attempts to open the main dart file based on the TEMPLATE and NAME."
+  (when (y-or-n-p (format "Project '%s' created! Navigate to it? " name))
+    (dired dir)
+    (let* ((filename (if (string= template "app") 
+                         "main.dart" 
+                       (format "%s.dart" name)))
+           (main-file (expand-file-name (concat "lib/" filename) dir)))
+      (when (file-exists-p main-file)
+        (find-file main-file)))))
+
+(defun flutter-tools--create-sentinel (process event)
+  "Callback executed when the flutter create PROCESS changes state (EVENT)."
+  (let ((name     (process-get process 'fc-name))
+        (dir      (process-get process 'fc-dir))
+        (template (process-get process 'fc-template)))
+    
+    (if (string-match-p "finished" event)
+        (progn
+          (message "Flutter project '%s' created successfully." name)
+          (flutter-tools--open-project name dir template))
+      (message "Flutter create exited with: %s" (string-trim event)))))
+
+;;;###autoload
+(defun flutter-create (type-choice parent-dir name)
   "Create a new Flutter application or library.
 Prompts for project type, directory, and name, runs `flutter create` asynchronously,
 and optionally navigates to the newly created project directory."
-  (interactive)
-  (let* ((type-choice (completing-read "Project type: " '("application" "library") nil t))
-         (template (if (string= type-choice "application") "app" "package"))
-         (parent-dir (read-directory-name "Select parent directory: "))
-         (name (read-string "Project name (e.g. my_cool_app): "))
+  ;; Gather user input using the interactive spec
+  (interactive
+   (list
+    (completing-read "Project type: " '("application" "library") nil t)
+    (read-directory-name "Select parent directory: ")
+    (read-string "Project name (e.g. my_cool_app): ")))
+
+  (let* ((template (if (string= type-choice "application") "app" "package"))
          (project-dir (expand-file-name name parent-dir))
-         (flutter-bin (if (executable-find "flutter.bat") "flutter.bat" "flutter"))
+         (flutter-bin (flutter-tools--get-executable))
          (buf-name (format "*flutter create %s*" name))
-         
-         (proc (make-process
-                :name "flutter-create-process"
-                :buffer buf-name
-                :command (list flutter-bin "create" "--template" template project-dir)
-                :sentinel
-                (lambda (process event)
-                  (let ((p-name (process-get process 'fc-name))
-                        (p-dir (process-get process 'fc-dir))
-                        (p-template (process-get process 'fc-template)))
-                    
-                    (if (string-match-p "finished" event)
-                        (progn
-                          (message "Flutter project created successfully.")
-                          (when (y-or-n-p (format "Project '%s' created! Navigate to it? " p-name))
-                            (dired p-dir)
-                            (let ((main-file (expand-file-name 
-                                              (if (string= p-template "app") 
-                                                  "lib/main.dart" 
-                                                (format "lib/%s.dart" p-name)) 
-                                              p-dir)))
-                              (when (file-exists-p main-file)
-                                (find-file main-file)))))
-                      (message "Flutter create exited with: %s" event)))))))
+         (output-buf (get-buffer-create buf-name)))
 
-    (process-put proc 'fc-name name)
-    (process-put proc 'fc-dir project-dir)
-    (process-put proc 'fc-template template)
+    ;; UI Feedback
+    (message "Creating %s '%s' in %s..." type-choice name project-dir)
+    (display-buffer output-buf)
 
-    (display-buffer (get-buffer-create buf-name))
-    (message "Creating %s '%s' in %s..." type-choice name project-dir)))
+    ;; Start the async process
+    (let ((proc (make-process
+                 :name "flutter-create-process"
+                 :buffer output-buf
+                 :command (list flutter-bin "create" "--template" template project-dir)
+                 :sentinel #'flutter-tools--create-sentinel)))
+      
+      ;; Store metadata on the process object for the sentinel to use
+      (process-put proc 'fc-name name)
+      (process-put proc 'fc-dir project-dir)
+      (process-put proc 'fc-template template))))
 
 (provide 'flutter-tools-create)
