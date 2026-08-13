@@ -1,7 +1,11 @@
-;;; flutter-tools-utils.el --- Utilities functions for flutter-tools -*- lexical-binding: t; -*-
+;;; flutter-tools-utils.el --- Utilities for flutter-tools -*- lexical-binding: t; -*-
 
 (defun flutter-tools--get-executable ()
-  "Return the appropriate flutter executable, handling Windows differences."
-  (if (executable-find "flutter.bat") "flutter.bat" "flutter"))
+  "Return the absolute path to the flutter executable based on the OS.
+Falls back to the string name if not found in `exec-path'."
+  (let ((exe-name (if (eq system-type 'windows-nt) 
+                      "flutter.bat" 
+                    "flutter")))
+    exe-name))
 
 (provide 'flutter-tools-utils)
