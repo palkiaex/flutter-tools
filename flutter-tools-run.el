@@ -1,8 +1,8 @@
 ;;; flutter-tools-run.el --- Run and reload flutter apps -*- lexical-binding: t; -*-
 
 (require 'json)
-(require 'term)
-(require 'comint)
+(require 'eshell)
+(require 'esh-mode)
 (require 'compile)
 (require 'flutter-tools-vars)
 (require 'flutter-tools-utils)
@@ -18,9 +18,16 @@
                     (alist-get 'id device)))
             json-array)))
 
+(defun flutter-tools--get-process ()
+  "Get the current flutter process running in Eshell."
+  (let ((buf (get-buffer "*flutter-run*")))
+    (when buf
+      ;; Fallback backward compatibility for flutter-tools--process if needed elsewhere
+      (setq flutter-tools--process (get-buffer-process buf)))))
+
 ;;;###autoload
 (defun flutter-run (&optional device-id)
-  "Start `flutter run' in a dedicated buffer at the project root.
+  "Start `flutter run' in a dedicated Eshell buffer at the project root.
 If multiple devices are connected, prompt the user to select one.
 Remembers the selected device for future runs. Use a prefix argument
 (e.g., C-u M-x flutter-run) to force re-selecting a device."
@@ -47,64 +54,65 @@ Remembers the selected device for future runs. Use a prefix argument
          (default-directory project-root)
          (flutter-bin (flutter-tools--get-executable))
          (buf-name "*flutter-run*")
-         (args (if device-id (list "run" "-d" device-id) (list "run"))))
+         (args (if device-id (list "run" "-d" device-id) (list "run")))
+         ;; Properly quote arguments in case executable path has spaces
+         (cmd-string (mapconcat (lambda (arg)
+                                  (if (fboundp 'eshell-quote-argument)
+                                      (eshell-quote-argument arg)
+                                    (shell-quote-argument arg)))
+                                (cons flutter-bin args) " ")))
 
     ;; If the process is already running, just focus it
-    (if (and flutter-tools--process (process-live-p flutter-tools--process))
-        (progn
-          (message "Flutter is already running.")
-          (display-buffer (process-buffer flutter-tools--process)))
+    (let ((existing-proc (flutter-tools--get-process)))
+      (if (and existing-proc (process-live-p existing-proc))
+          (progn
+            (message "Flutter is already running.")
+            (display-buffer (process-buffer existing-proc)))
 
-      ;; Kill existing dead buffer to prevent creating *flutter-run*<2>
-      (when (get-buffer buf-name)
-        (kill-buffer buf-name))
+        ;; Kill existing dead buffer to prevent creating *flutter-run*<2> or messing up Eshell state
+        (when (get-buffer buf-name)
+          (kill-buffer buf-name))
 
-      ;; OS-AWARE PROCESS SPAWNING
-      (let ((buf
-             (if (eq system-type 'windows-nt)
-                 ;; WINDOWS: Fallback to comint (Native Windows lacks PTY support)
-                 (let ((b (get-buffer-create buf-name)))
-                   (apply #'make-comint-in-buffer "flutter-run" b flutter-bin nil args)
-                   (with-current-buffer b
-                     (ansi-color-for-comint-mode-on))
-                   b)
-               ;; LINUX/macOS: Use term for true terminal emulation
-               (let ((b (apply #'make-term "flutter-run" flutter-bin nil args)))
-                 (with-current-buffer b
-                   (term-mode)
-                   (term-char-mode))
-                 b))))
+        ;; SPAWN ESHELL PROCESS
+        (let* ((eshell-buffer-name buf-name)
+               ;; Start Eshell in the background temporarily to avoid auto window layout changes
+               (buf (save-window-excursion (eshell))))
+          
+          (with-current-buffer buf
+            (goto-char (point-max))
+            (insert cmd-string)
+            ;; Simulates pressing "Enter" on the command string inside eshell
+            (eshell-send-input)
 
-        (setq flutter-tools--process (get-buffer-process buf))
+            ;; Apply compilation mode for clickable errors in the Eshell buffer
+            (setq-local compilation-error-regexp-alist
+                        (append '(flutter-dart
+                                  flutter-msbuild-error
+                                  flutter-msbuild-warning)
+                                compilation-error-regexp-alist))
+            (compilation-shell-minor-mode 1))
 
-        ;; Apply compilation mode for clickable errors in both term & comint
-        (with-current-buffer buf
-          (setq-local compilation-error-regexp-alist
-                      (append '(flutter-dart
-                                flutter-msbuild-error
-                                flutter-msbuild-warning)
-                              compilation-error-regexp-alist))
-          (compilation-shell-minor-mode 1))
-
-        (display-buffer buf)))))
+          (display-buffer buf))))))
 
 ;;;###autoload
 (defun flutter-hot-reload ()
-  "Send the 'r' character to the active flutter process."
+  "Send the 'r' character to the active flutter process in Eshell."
   (interactive)
-  (if (and flutter-tools--process (process-live-p flutter-tools--process))
-      (progn
-        (process-send-string flutter-tools--process "r")
-        (message "Sent hot reload to flutter..."))
-    (message "Flutter is not currently running.")))
+  (let ((proc (flutter-tools--get-process)))
+    (if (and proc (process-live-p proc))
+        (progn
+          (process-send-string proc "r")
+          (message "Sent hot reload to flutter..."))
+      (message "Flutter is not currently running."))))
 
 ;;;###autoload
 (defun flutter-reload-on-save ()
   "Trigger hot reload automatically when saving a dart file.
 Add this to `after-save-hook'."
-  (when (and (eq major-mode 'dart-mode)
-             flutter-tools--process
-             (process-live-p flutter-tools--process))
-    (flutter-hot-reload)))
+  (let ((proc (flutter-tools--get-process)))
+    (when (and (eq major-mode 'dart-mode)
+               proc
+               (process-live-p proc))
+      (flutter-hot-reload))))
 
 (provide 'flutter-tools-run)
