@@ -1,6 +1,7 @@
 ;;; flutter-tools-run.el --- Run and reload flutter apps -*- lexical-binding: t; -*-
 
 (require 'json)
+(require 'term)
 (require 'comint)
 (require 'compile)
 (require 'flutter-tools-vars)
@@ -21,50 +22,71 @@
 (defun flutter-run (&optional device-id)
   "Start `flutter run' in a dedicated buffer at the project root.
 If multiple devices are connected, prompt the user to select one.
-Remembers the selected device for future runs. Use a prefix argument 
+Remembers the selected device for future runs. Use a prefix argument
 (e.g., C-u M-x flutter-run) to force re-selecting a device."
   (interactive
-   (list 
+   (list
     (if (and flutter-tools--last-device-id (not current-prefix-arg))
         flutter-tools--last-device-id
       (let ((devices (flutter-tools--get-devices)))
         (cond
-         ((null devices) 
+         ((null devices)
           (message "No Flutter devices found.")
           nil)
-         ((= (length devices) 1) 
-          (cdar devices)) ;; `cdar` gets the ID of the first (and only) pair
-         (t 
+         ((= (length devices) 1)
+          (cdar devices))
+         (t
           (let ((choice (completing-read "Select device: " devices nil t)))
             (cdr (assoc choice devices)))))))))
-             
+
   (when device-id
     (setq flutter-tools--last-device-id device-id))
-    
+
   (let* ((project-root (or (locate-dominating-file default-directory "pubspec.yaml")
                            default-directory))
-         ;; Temporarily set default-directory so the comint buffer inherits it correctly
          (default-directory project-root)
          (flutter-bin (flutter-tools--get-executable))
-         (buf (get-buffer-create "*flutter run*"))
+         (buf-name "*flutter-run*")
          (args (if device-id (list "run" "-d" device-id) (list "run"))))
-    
-    ;; Create the process using the cross-platform executable
-    (apply #'make-comint-in-buffer "flutter-run" buf flutter-bin nil args)
-    (setq flutter-tools--process (get-buffer-process buf))
-    
-    (with-current-buffer buf
-      ;; setq-local is the modern, idiomatic replacement for make-local-variable + setq
-      (setq-local compilation-error-regexp-alist
-                  (append '(flutter-dart 
-                            flutter-msbuild-error 
-                            flutter-msbuild-warning)
-                          compilation-error-regexp-alist))
-      
-      (compilation-shell-minor-mode 1)
-      (ansi-color-for-comint-mode-on))
-    
-    (display-buffer buf)))
+
+    ;; If the process is already running, just focus it
+    (if (and flutter-tools--process (process-live-p flutter-tools--process))
+        (progn
+          (message "Flutter is already running.")
+          (display-buffer (process-buffer flutter-tools--process)))
+
+      ;; Kill existing dead buffer to prevent creating *flutter-run*<2>
+      (when (get-buffer buf-name)
+        (kill-buffer buf-name))
+
+      ;; OS-AWARE PROCESS SPAWNING
+      (let ((buf
+             (if (eq system-type 'windows-nt)
+                 ;; WINDOWS: Fallback to comint (Native Windows lacks PTY support)
+                 (let ((b (get-buffer-create buf-name)))
+                   (apply #'make-comint-in-buffer "flutter-run" b flutter-bin nil args)
+                   (with-current-buffer b
+                     (ansi-color-for-comint-mode-on))
+                   b)
+               ;; LINUX/macOS: Use term for true terminal emulation
+               (let ((b (apply #'make-term "flutter-run" flutter-bin nil args)))
+                 (with-current-buffer b
+                   (term-mode)
+                   (term-char-mode))
+                 b))))
+
+        (setq flutter-tools--process (get-buffer-process buf))
+
+        ;; Apply compilation mode for clickable errors in both term & comint
+        (with-current-buffer buf
+          (setq-local compilation-error-regexp-alist
+                      (append '(flutter-dart
+                                flutter-msbuild-error
+                                flutter-msbuild-warning)
+                              compilation-error-regexp-alist))
+          (compilation-shell-minor-mode 1))
+
+        (display-buffer buf)))))
 
 ;;;###autoload
 (defun flutter-hot-reload ()
