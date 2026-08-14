@@ -4,6 +4,7 @@
 (require 'flutter-tools-compile)
 (require 'flutter-tools-run)
 (require 'flutter-tools-create)
+(require 'flutter-tools-pub)
 
 (add-hook 'after-save-hook #'flutter-reload-on-save)
 
