@@ -86,27 +86,36 @@ Returns the created buffer."
       (flutter-tools--setup-compilation-mode))
     buf))
 
+(defun flutter-tools--clean-environment (env)
+  "Return a copy of ENV without Command Line Tools compiler/linker flags."
+  (let ((bad-vars '("CC" "CXX" "LD" "AR" "RANLIB"
+                    "LIBRARY_PATH" "DYLD_LIBRARY_PATH"
+                    "DYLD_FALLBACK_LIBRARY_PATH")))
+    (seq-remove (lambda (entry)
+                  (let ((var-name (car (split-string entry "="))))
+                    (and (member var-name bad-vars)
+                         (string-match-p "CommandLineTools" entry))))
+                env)))
 
 ;;; --- Interactive Commands ---
 
-;;;###autoload
-(defun flutter-run (&optional device-id)
-  "Start `flutter run` at the project root.
-On Windows, uses comint. On Linux/macOS, uses a dedicated Eshell buffer.
-If multiple devices are connected, prompt the user to select one.
-Remembers the selected device for future runs. Use a prefix argument
-(e.g., C-u M-x flutter-run) to force re-selecting a device."
-  (interactive (list (flutter-tools--select-device current-prefix-arg)))
-
+(defun flutter-tools--run-internal (device-id &optional extra-args)
+  "Internal function to start flutter run.
+DEVICE-ID is the target device. EXTRA-ARGS is a list of additional
+arguments (e.g., '(\"--release\")) to pass to the flutter command."
   (when device-id
     (setq flutter-tools--last-device-id device-id))
 
-  (let* ((project-root (or (locate-dominating-file default-directory "pubspec.yaml")
+  (let* ((process-environment (if (eq system-type 'darwin)
+                                  (flutter-tools--clean-environment process-environment)
+                                process-environment))
+         (project-root (or (locate-dominating-file default-directory "pubspec.yaml")
                            default-directory))
          (default-directory project-root)
          (flutter-bin (flutter-tools--get-executable))
          (buf-name "*flutter-run*")
-         (args (if device-id (list "run" "-d" device-id) (list "run")))
+         (base-args (if device-id (list "run" "-d" device-id) (list "run")))
+         (args (append base-args extra-args))
          (existing-proc (flutter-tools--get-process)))
 
     ;; Check if process is already running
@@ -124,6 +133,23 @@ Remembers the selected device for future runs. Use a prefix argument
                      (flutter-tools--start-comint buf-name flutter-bin args)
                    (flutter-tools--start-eshell buf-name flutter-bin args))))
         (display-buffer buf)))))
+
+;;;###autoload
+(defun flutter-run (&optional device-id)
+  "Start `flutter run` at the project root.
+On Windows, uses comint. On Linux/macOS, uses a dedicated Eshell buffer.
+If multiple devices are connected, prompt the user to select one.
+Remembers the selected device for future runs. Use a prefix argument
+(e.g., C-u M-x flutter-run) to force re-selecting a device."
+  (interactive (list (flutter-tools--select-device current-prefix-arg)))
+  (flutter-tools--run-internal device-id nil))
+
+;;;###autoload
+(defun flutter-run-release (&optional device-id)
+  "Start `flutter run --release` at the project root.
+Shares the same device selection and process management as `flutter-run`."
+  (interactive (list (flutter-tools--select-device current-prefix-arg)))
+  (flutter-tools--run-internal device-id '("--release")))
 
 ;;;###autoload
 (defun flutter-hot-reload ()
