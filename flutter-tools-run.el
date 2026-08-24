@@ -38,7 +38,6 @@ returns the last used device."
         (let ((choice (completing-read "Select device: " devices nil t)))
           (cdr (assoc choice devices))))))))
 
-
 ;;; --- Process Management ---
 
 (defun flutter-tools--get-process ()
@@ -57,18 +56,29 @@ returns the last used device."
                       compilation-error-regexp-alist))
   (compilation-shell-minor-mode 1))
 
+(defun flutter-tools--clear-eshell-scrollback ()
+  "Clear old output in the current Eshell buffer while preserving the prompt."
+  (let ((inhibit-read-only t))
+    (if (fboundp 'eshell/clear-scrollback)
+        (ignore-errors (eshell/clear-scrollback))
+      (when (and (boundp 'eshell-last-output-end)
+                 (markerp eshell-last-output-end))
+        (delete-region (point-min) (marker-position eshell-last-output-end))))))
+
 (defun flutter-tools--start-comint (buf-name flutter-bin args)
   "Start the flutter process using comint (used for Windows).
-Returns the created buffer."
+Clears previous logs and returns the created buffer."
   (let ((buf (get-buffer-create buf-name)))
     (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer))
       (apply #'make-comint-in-buffer "flutter-run" buf flutter-bin nil args)
       (flutter-tools--setup-compilation-mode))
     buf))
 
 (defun flutter-tools--start-eshell (buf-name flutter-bin args)
   "Start the flutter process using Eshell (used for macOS/Linux).
-Returns the created buffer."
+Clears previous scrollback and returns the created buffer."
   (let* ((eshell-buffer-name buf-name)
          ;; Properly quote arguments in case executable path has spaces
          (cmd-string (mapconcat (lambda (arg)
@@ -76,9 +86,10 @@ Returns the created buffer."
                                       (eshell-quote-argument arg)
                                     (shell-quote-argument arg)))
                                 (cons flutter-bin args) " "))
-         ;; Start Eshell in the background temporarily
+         ;; Start or reuse Eshell buffer without altering window layout
          (buf (save-window-excursion (eshell))))
     (with-current-buffer buf
+      (flutter-tools--clear-eshell-scrollback)
       (goto-char (point-max))
       (insert cmd-string)
       ;; Simulates pressing "Enter" on the command string inside eshell
@@ -124,11 +135,7 @@ arguments (e.g., '(\"--release\")) to pass to the flutter command."
           (message "Flutter is already running.")
           (display-buffer (process-buffer existing-proc)))
 
-      ;; Cleanup dead buffer if it exists
-      (when (get-buffer buf-name)
-        (kill-buffer buf-name))
-
-      ;; Start new process based on OS
+      ;; Start new process in place (clearing previous output while preserving window layout)
       (let ((buf (if (eq system-type 'windows-nt)
                      (flutter-tools--start-comint buf-name flutter-bin args)
                    (flutter-tools--start-eshell buf-name flutter-bin args))))
@@ -173,3 +180,4 @@ Add this to `after-save-hook'."
       (flutter-hot-reload))))
 
 (provide 'flutter-tools-run)
+;;; flutter-tools-run.el ends here
