@@ -8,4 +8,7 @@
 
 (add-hook 'after-save-hook #'flutter-reload-on-save)
 
+(use-package dart-mode
+  :ensure t)
+
 (provide 'flutter-tools)
