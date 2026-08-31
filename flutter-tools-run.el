@@ -8,6 +8,34 @@
 (require 'flutter-tools-vars)
 (require 'flutter-tools-utils)
 
+;;; -- Project management ---
+
+(defvar flutter-tools--current-project-root nil
+  "The remembered project root directory for flutter runs.")
+
+(defun flutter-tools--get-project-root (&optional force-prompt)
+  "Get the project root.
+If FORCE-PROMPT is non-nil, ask the user to select the directory.
+Otherwise, use the remembered directory. If none is remembered yet,
+auto-detect it from the current buffer."
+  (let ((detected (or (locate-dominating-file default-directory "pubspec.yaml")
+                      default-directory)))
+    (cond
+     (force-prompt
+      (setq flutter-tools--current-project-root
+            (expand-file-name (read-directory-name "Flutter project root: " detected detected t))))
+     (flutter-tools--current-project-root
+      flutter-tools--current-project-root)
+     (t
+      (setq flutter-tools--current-project-root (expand-file-name detected))))))
+
+;;;###autoload
+(defun flutter-set-project (dir)
+  "Manually set the default project directory for flutter commands."
+  (interactive "DFlutter project root: ")
+  (setq flutter-tools--current-project-root (expand-file-name dir))
+  (message "Flutter project root set to: %s" flutter-tools--current-project-root))
+
 ;;; --- Device Management ---
 
 (defun flutter-tools--get-devices ()
@@ -65,19 +93,21 @@ returns the last used device."
                  (markerp eshell-last-output-end))
         (delete-region (point-min) (marker-position eshell-last-output-end))))))
 
-(defun flutter-tools--start-comint (buf-name flutter-bin args)
-  "Start the flutter process using comint (used for Windows).
+(defun flutter-tools--start-comint (buf-name flutter-bin args dir)
+  "Start the flutter process using comint (used for Windows) in DIR.
 Clears previous logs and returns the created buffer."
   (let ((buf (get-buffer-create buf-name)))
     (with-current-buffer buf
+      ;; Force the reused buffer to update its directory
+      (setq default-directory dir)
       (let ((inhibit-read-only t))
         (erase-buffer))
       (apply #'make-comint-in-buffer "flutter-run" buf flutter-bin nil args)
       (flutter-tools--setup-compilation-mode))
     buf))
 
-(defun flutter-tools--start-eshell (buf-name flutter-bin args)
-  "Start the flutter process using Eshell (used for macOS/Linux).
+(defun flutter-tools--start-eshell (buf-name flutter-bin args dir)
+  "Start the flutter process using Eshell (used for macOS/Linux) in DIR.
 Clears previous scrollback and returns the created buffer."
   (let* ((eshell-buffer-name buf-name)
          ;; Properly quote arguments in case executable path has spaces
@@ -89,6 +119,8 @@ Clears previous scrollback and returns the created buffer."
          ;; Start or reuse Eshell buffer without altering window layout
          (buf (save-window-excursion (eshell))))
     (with-current-buffer buf
+      ;; Force the reused Eshell buffer to update its directory
+      (setq default-directory dir)
       (flutter-tools--clear-eshell-scrollback)
       (goto-char (point-max))
       (insert cmd-string)
@@ -110,19 +142,22 @@ Clears previous scrollback and returns the created buffer."
 
 ;;; --- Interactive Commands ---
 
-(defun flutter-tools--run-internal (device-id &optional extra-args)
+(defun flutter-tools--run-internal (device-id project-root &optional extra-args)
   "Internal function to start flutter run.
-DEVICE-ID is the target device. EXTRA-ARGS is a list of additional
-arguments (e.g., '(\"--release\")) to pass to the flutter command."
+DEVICE-ID is the target device. PROJECT-ROOT is the working directory.
+EXTRA-ARGS is a list of additional arguments."
   (when device-id
     (setq flutter-tools--last-device-id device-id))
+  (when project-root
+    (setq flutter-tools--current-project-root project-root))
 
   (let* ((process-environment (if (eq system-type 'darwin)
                                   (flutter-tools--clean-environment process-environment)
                                 process-environment))
-         (project-root (or (locate-dominating-file default-directory "pubspec.yaml")
-                           default-directory))
-         (default-directory project-root)
+         ;; Use the remembered root, or auto-detect if somehow still nil
+         (root (or flutter-tools--current-project-root
+                   (flutter-tools--get-project-root)))
+         (default-directory root)
          (flutter-bin (flutter-tools--get-executable))
          (buf-name "*flutter-run*")
          (base-args (if device-id (list "run" "-d" device-id) (list "run")))
@@ -132,31 +167,38 @@ arguments (e.g., '(\"--release\")) to pass to the flutter command."
     ;; Check if process is already running
     (if (and existing-proc (process-live-p existing-proc))
         (progn
-          (message "Flutter is already running.")
+          (message "Flutter is already running in %s." (process-get existing-proc 'default-directory))
           (display-buffer (process-buffer existing-proc)))
 
-      ;; Start new process in place (clearing previous output while preserving window layout)
+      ;; Start new process in place
       (let ((buf (if (eq system-type 'windows-nt)
-                     (flutter-tools--start-comint buf-name flutter-bin args)
-                   (flutter-tools--start-eshell buf-name flutter-bin args))))
+                     (flutter-tools--start-comint buf-name flutter-bin args root)
+                   (flutter-tools--start-eshell buf-name flutter-bin args root))))
         (display-buffer buf)))))
 
 ;;;###autoload
-(defun flutter-run (&optional device-id)
-  "Start `flutter run` at the project root.
+;;;###autoload
+(defun flutter-run (&optional device-id project-root)
+  "Start `flutter run`.
 On Windows, uses comint. On Linux/macOS, uses a dedicated Eshell buffer.
-If multiple devices are connected, prompt the user to select one.
-Remembers the selected device for future runs. Use a prefix argument
-(e.g., C-u M-x flutter-run) to force re-selecting a device."
-  (interactive (list (flutter-tools--select-device current-prefix-arg)))
-  (flutter-tools--run-internal device-id nil))
+Once run, it remembers the project directory everywhere.
+Use a prefix argument (C-u M-x flutter-run) to force re-selecting
+both the device and the project directory."
+  (interactive
+   (let ((force current-prefix-arg))
+     (list (flutter-tools--select-device force)
+           (flutter-tools--get-project-root force))))
+  (flutter-tools--run-internal device-id project-root nil))
 
 ;;;###autoload
-(defun flutter-run-release (&optional device-id)
-  "Start `flutter run --release` at the project root.
-Shares the same device selection and process management as `flutter-run`."
-  (interactive (list (flutter-tools--select-device current-prefix-arg)))
-  (flutter-tools--run-internal device-id '("--release")))
+(defun flutter-run-release (&optional device-id project-root)
+  "Start `flutter run --release`.
+Shares the same device selection and directory memory as `flutter-run`."
+  (interactive
+   (let ((force current-prefix-arg))
+     (list (flutter-tools--select-device force)
+           (flutter-tools--get-project-root force))))
+  (flutter-tools--run-internal device-id project-root '("--release")))
 
 ;;;###autoload
 (defun flutter-hot-reload ()
